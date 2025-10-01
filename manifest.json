@@ -1,0 +1,188 @@
+  <script>
+        // DOM Elements
+        const elements = {
+            photoInput: document.getElementById('wildlife-photo'),
+            photoPreview: document.getElementById('photo-preview'),
+            sightingDetails: document.getElementById('sighting-details'),
+            loaderContainer: document.getElementById('loader-container'),
+            step1: document.getElementById('step-1-photo'),
+            step2: document.getElementById('step-2-info'),
+            step3: document.getElementById('step-3-contact'),
+            actionButtons: document.getElementById('action-buttons'),
+            scientificNameEl: document.getElementById('scientific-name'),
+            gpsCoordsEl: document.getElementById('gps-coords'),
+            gpsAutoContainer: document.getElementById('gps-auto-container'),
+            gpsManualContainer: document.getElementById('gps-manual-container'),
+            manualLat: document.getElementById('manual-lat'),
+            manualLon: document.getElementById('manual-lon'),
+            sendReportBtn: document.getElementById('send-report-btn'),
+            resetBtn: document.getElementById('reset-btn'),
+            userName: document.getElementById('user-name'),
+            userContact: document.getElementById('user-contact'),
+            userNotes: document.getElementById('user-notes'),
+            installBtn: document.getElementById('install-btn'),
+        };
+
+        const modals = {
+            error: { el: document.getElementById('error-modal'), msg: document.getElementById('error-message'), btn: document.getElementById('close-error-modal') },
+            success: { el: document.getElementById('success-modal'), btn: document.getElementById('close-success-modal') },
+            info: { el: document.getElementById('info-modal'), msg: document.getElementById('info-message'), btn: document.getElementById('close-info-modal') }
+        };
+
+        // --- State ---
+        let db;
+        let sightingData = {};
+        let deferredInstallPrompt = null;
+
+        // --- Event Listeners ---
+        window.addEventListener('load', () => {
+            initDb();
+            registerServiceWorker();
+            checkPendingReports();
+        });
+        window.addEventListener('beforeinstallprompt', (e) => {
+            e.preventDefault();
+            deferredInstallPrompt = e;
+            elements.installBtn.classList.remove('hidden');
+        });
+
+        elements.installBtn.addEventListener('click', () => {
+            if (deferredInstallPrompt) {
+                deferredInstallPrompt.prompt();
+                deferredInstallPrompt.userChoice.then(choiceResult => {
+                    if (choiceResult.outcome === 'accepted') {
+                        console.log('User accepted the install prompt');
+                    } else {
+                        console.log('User dismissed the install prompt');
+                    }
+                    deferredInstallPrompt = null;
+                    elements.installBtn.classList.add('hidden');
+                });
+            }
+        });
+        
+        elements.photoInput.addEventListener('change', handlePhotoSelect);
+        elements.resetBtn.addEventListener('click', resetApp);
+        elements.sendReportBtn.addEventListener('click', processReport);
+        modals.error.btn.addEventListener('click', () => toggleModal(modals.error, false));
+        modals.success.btn.addEventListener('click', () => toggleModal(modals.success, false));
+        modals.info.btn.addEventListener('click', () => toggleModal(modals.info, false));
+
+        // --- Database ---
+        function initDb() {
+            const request = indexedDB.open('wildlifeDB', 1);
+            request.onupgradeneeded = event => {
+                db = event.target.result;
+                db.createObjectStore('reports', { keyPath: 'id', autoIncrement: true });
+            };
+            request.onsuccess = event => { db = event.target.result; };
+            request.onerror = event => console.error('DB Error:', event.target.errorCode);
+        }
+
+        function saveReportOffline(report) {
+            const transaction = db.transaction(['reports'], 'readwrite');
+            const store = transaction.objectStore('reports');
+            store.add(report);
+            transaction.oncomplete = () => {
+                toggleModal(modals.info, true, "No internet connection. Your report has been saved and will be sent automatically when you're back online.");
+                setTimeout(resetApp, 3000);
+            };
+        }
+
+        // --- Core App Logic ---
+        function registerServiceWorker() {
+            if ('serviceWorker' in navigator) {
+                navigator.serviceWorker.register('./service-worker.js')
+                    .then(reg => {
+                        console.log('Service worker registration successful:', reg);
+                        if (!('SyncManager' in window)) {
+                            console.warn('Background sync not supported by this browser.');
+                        }
+                    })
+                    .catch(err => console.error('Service worker registration failed:', err));
+            } else {
+                console.warn('Service workers are not supported by this browser.');
+            }
+        }
+        
+        async function checkPendingReports() {
+            if (!db) return;
+            const transaction = db.transaction(['reports'], 'readonly');
+            const store = transaction.objectStore('reports');
+            const countRequest = store.count();
+            countRequest.onsuccess = () => {
+                if (countRequest.result > 0) {
+                     toggleModal(modals.info, true, `You have ${countRequest.result} pending report(s) that will be sent when you're online.`);
+                }
+            };
+        }
+
+        async function handlePhotoSelect(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            resetApp(true);
+            elements.sightingDetails.classList.remove('hidden');
+            elements.loaderContainer.classList.remove('hidden');
+            
+            try {
+                const reader = new FileReader();
+                reader.onload = async (e) => {
+                    elements.photoPreview.src = e.target.result;
+                    sightingData.imageData = e.target.result.split(',')[1];
+
+                    const [location, species] = await Promise.all([
+                        getLocation(),
+                        identifySpecies(sightingData.imageData)
+                    ]);
+                    
+                    sightingData.latitude = location.latitude;
+                    sightingData.longitude = location.longitude;
+                    sightingData.scientificName = species;
+
+                    updateUIWithData();
+                };
+                reader.readAsDataURL(file);
+            } catch (error) {
+                console.error("Processing error:", error);
+                toggleModal(modals.error, true, error.message);
+                resetApp();
+            }
+        }
+        
+        function updateUIWithData() {
+            elements.scientificNameEl.textContent = sightingData.scientificName || 'Could not identify';
+            if (sightingData.latitude && sightingData.longitude) {
+                elements.gpsCoordsEl.textContent = `${sightingData.latitude.toFixed(5)}, ${sightingData.longitude.toFixed(5)}`;
+                elements.gpsAutoContainer.classList.remove('hidden');
+                elements.gpsManualContainer.classList.add('hidden');
+            } else {
+                elements.gpsAutoContainer.classList.add('hidden');
+                elements.gpsManualContainer.classList.remove('hidden');
+            }
+            elements.loaderContainer.classList.add('hidden');
+            elements.step2.classList.remove('hidden');
+            elements.step3.classList.remove('hidden');
+            elements.actionButtons.classList.remove('hidden');
+        }
+
+        function getLocation() {
+            return new Promise((resolve) => {
+                if (!navigator.geolocation) {
+                    resolve({ latitude: null, longitude: null });
+                    return;
+                }
+                navigator.geolocation.getCurrentPosition(
+                    (position) => {
+                        resolve({
+                            latitude: position.coords.latitude,
+                            longitude: position.coords.longitude
+                        });
+                    },
+                    () => { // On Error
+                        resolve({ latitude: null, longitude: null });
+                    },
+                    { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+                );
+            });
+        }
